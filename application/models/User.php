@@ -16,10 +16,9 @@ class User extends MY_Model
         'summary' => 'array,comment:简介'
     ];
 
-    protected static $index = [
+    protected static $indexes = [
         'unique:idnumber',
-        'name,age',
-        'sex'
+        'name,age'
     ];
 
     public function getInfo()

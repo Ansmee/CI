@@ -5,7 +5,7 @@
 class MY_Model extends CI_Model
 {
     protected static $fields = [];
-    protected static $index = [];
+    protected static $indexes = [];
     protected static $tableName = '';
     protected static $_db = null;
     function __construct()
@@ -17,6 +17,7 @@ class MY_Model extends CI_Model
     {
         $tableName = static::$tableName;
         $fields    = static::$fields;
+        $indexes   = static::$indexes;
 
         if (!$tableName) return false;
         if (!is_array($fields) || !count($fields)) return false;
@@ -24,57 +25,77 @@ class MY_Model extends CI_Model
         $db = $this->_initDB();
         if (!$db) throw new \Exception("Database init failed");
 
+        // 表不存在，创建表，否则更新字段
+        $sql = '';
+        if (!$this->_tableExists($tableName)) {
+            $fieldStructure = $this->_makeFieldStructure($fields);
+            $indexStructure = $this->_makeIndexStucture($indexes);
+
+            $fieldSQL = implode(", ", $fieldStructure);
+            $indexSQL  = implode(", ", $indexStructure);
+            $sql = "CREATE TABLE `{$tableName}` ( {$fieldSQL}, {$indexSQL} )  ENGINE=InnoDB DEFAULT CHARSET=utf8";
+        } else {
+            $tableFields  = $this->_getTableFields($tableName);
+            if (!$tableFields) throw new \Exception("Unexpected Error");
+            $changedFields = $this->_getChangedFields($fields, $tableFields);
+            error_log(json_encode($changedFields));
+        }
+
+        if ($sql) {
+            $res = @$db->query($sql);
+            if (!$res) throw new \Exception("Query Error: {$sql}");
+        }
+
+        return true;
+    }
+
+    private function _makeFieldStructure($fields)
+    {
         foreach ($fields as $name => $fieldInfo) {
             if (!$fieldInfo) continue;
-            $fieldsSQLARR[] = $this->_getCreateSQL($name, $fieldInfo);
+            $fieldStructure[] = $this->_getFieldStruct($name, $fieldInfo);
         }
 
-        // 表不存在，创建表，否则更新字段
-        if (!$this->_tableExists($tableName)) {
-            $sql = "CREATE TABLE `{$tableName}` ";
-            $fieldsSQLARR[] = "`id` bigint(20) NOT NULL AUTO_INCREMENT";
-            $fieldsSQLARR[] = "PRIMARY KEY (`id`)";
-            $fieldsSQL = implode(", ", $fieldsSQLARR);
+        $fieldStructure[] = "`id` bigint(20) NOT NULL AUTO_INCREMENT";
+        $fieldStructure[] = "PRIMARY KEY (`id`)";
 
-            $sql .= '(' . $fieldsSQL . ') ENGINE=InnoDB DEFAULT CHARSET=utf8';
-        } else {
-            $currentFields  = $this->_getTableFields($tableName);
-            if (!$currentFields) throw new \Exception("Unexpected Error");
+        return $fieldStructure;
+    }
 
-            $currentIndexes = $this->_getTableIndexes($tableName);
-            if (!$currentIndexes) throw new \Exception("Unexpected Error");
+    private function _makeIndexStucture($indexes)
+    {
+        $indexStructure = [];
+        if (!count($indexes)) return $indexStructure;
+
+        foreach ($indexes as $indexeInfo) {
+            $tmpIndexStructrues[] = explode(':', $indexeInfo);
         }
 
-        error_log($sql);
-        // $res = @$db->query($sql);
-        if (!$res) throw new \Exception("Query Error: {$sql}");
+        $num = 0;
+        $indexPrefix = '_MIDX_';
+        foreach ($tmpIndexStructrues as $tmpIndexStructrue) {
+            $isUnique = in_array('unique', $tmpIndexStructrue) ? true : false;
+            $indexArrs = explode(',', end($tmpIndexStructrue));
+            $indexArrs = array_map(function($value){
+                return "`{$value}`";
+            }, $indexArrs);
+            $indexFields = implode(',', $indexArrs);
+            $indexName = $indexPrefix . $num;
+            $indexStructure[] = $isUnique ? "UNIQUE KEY `{$indexName}` ({$indexFields})" : "KEY `{$indexName}` ({$indexFields})";
+            $num ++;
+        }
 
-        return !! $res;
+        return $indexStructure;
     }
 
-    private function _initDB()
+    private function _getChangedFields($fields, $tableFields)
     {
-        if (self::$_db) return self::$_db;
-
-        $this->load->database();
-        self::$_db = $this->db;
-        if (self::$_db) return self::$_db;
-
-        return false;
-    }
-
-    private function _tableExists($tableName)
-    {
-        $db = $this->_initDB();
-        $databaseName = $db->database;
-
-        $sql = "SELECT COUNT(1) as count  FROM `INFORMATION_SCHEMA`.`TABLES` WHERE `TABLE_SCHEMA`='$databaseName' and `TABLE_NAME`='{$tableName}'";
-        $query = $db->query($sql);
-
-        if (!$query) return false;
-        $row = $query->row();
-
-        return !! $row->count;
+        error_log(json_encode($tableFields, JSON_UNESCAPED_UNICODE));
+        foreach ($fields as $name => $fieldInfo) {
+            if (!$fieldInfo) continue;
+            $analyzeArr = $this->_analyzeField($fieldInfo);
+            error_log(json_encode($analyzeArr, JSON_UNESCAPED_UNICODE));
+        }
     }
 
     private function _getTableFields($tableName)
@@ -84,9 +105,20 @@ class MY_Model extends CI_Model
         $sql = "DESC `{$tableName}`";
         $query = $db->query($sql);
         if (!$query) return false;
-        $result = $query->result();
+        $fields = $query->result();
 
-        return $result;
+        $results = [];
+        foreach ($fields as $field) {
+            $name = $field->Field;
+            list($type, $length) = explode('(', $field->Type);
+            $results[$name] = [
+                'type'    => $type,
+                'length'  => rtrim($length, ')'),
+                'default' => $field->Default
+            ];
+        }
+
+        return $results;
     }
 
     private function _getTableIndexes($tableName)
@@ -101,27 +133,15 @@ class MY_Model extends CI_Model
         return $result;
     }
 
-    private function _getCreateSQL($fieldName, $fieldInfo)
+    private function _getFieldStruct($fieldName, $fieldInfo)
     {
+        $analyzeArr = $this->_analyzeField($fieldInfo);
+        $type    = $analyzeArr['type'];
+        $length  = $analyzeArr['length'];
+        $default = $analyzeArr['default'];
+        $comment = $analyzeArr['comment'];
+
         $sqlArr[] = "`{$fieldName}`";
-        $fieldArrs = explode(',', $fieldInfo);
-
-        $typeInfo = array_shift($fieldArrs);
-        $typeArr = explode(':', $typeInfo);
-        @list($type, $length) = $typeArr;
-
-        $default = $comment = '';
-        foreach ($fieldArrs as $fieldArr) {
-            @list($name, $value) = explode(':', $fieldArr);
-            switch ($name) {
-                case 'default':
-                    $default = $value;
-                    break;
-                case 'comment':
-                    $comment = $value;
-            }
-        }
-
         switch ($type) {
             case 'int':
                 $length = (int)$length ? (int)$length : 11;
@@ -150,6 +170,33 @@ class MY_Model extends CI_Model
         return $sql;
     }
 
+    private function _analyzeField($fieldInfo)
+    {
+        $fieldArrs = explode(',', $fieldInfo);
+
+        $typeInfo = array_shift($fieldArrs);
+        $typeArr = explode(':', $typeInfo);
+        @list($type, $length) = $typeArr;
+
+        foreach ($fieldArrs as $fieldArr) {
+            @list($name, $value) = explode(':', $fieldArr);
+            switch ($name) {
+                case 'default':
+                    $default = $value;
+                    break;
+                case 'comment':
+                    $comment = $value;
+            }
+        }
+
+        $data['type'] = $type;
+        $data['length'] = $length;
+        $data['default'] = $default;
+        $data['comment'] = $comment;
+
+        return $data;
+    }
+
     private function _getTextType($length = '')
     {
         switch ($length) {
@@ -165,5 +212,30 @@ class MY_Model extends CI_Model
         }
 
         return $type;
+    }
+
+    private function _initDB()
+    {
+        if (self::$_db) return self::$_db;
+
+        $this->load->database();
+        self::$_db = $this->db;
+        if (self::$_db) return self::$_db;
+
+        return false;
+    }
+
+    private function _tableExists($tableName)
+    {
+        $db = $this->_initDB();
+        $databaseName = $db->database;
+
+        $sql = "SELECT COUNT(1) as count  FROM `INFORMATION_SCHEMA`.`TABLES` WHERE `TABLE_SCHEMA`='$databaseName' and `TABLE_NAME`='{$tableName}'";
+        $query = $db->query($sql);
+
+        if (!$query) return false;
+        $row = $query->row();
+
+        return !! $row->count;
     }
 }
