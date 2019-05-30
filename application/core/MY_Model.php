@@ -28,6 +28,9 @@ class MY_Model extends CI_Model
         // 表不存在，创建表，否则更新字段
         $sql = '';
         if (!$this->_tableExists($tableName)) {
+            $fieldStructure[] = "`id` bigint(20) NOT NULL AUTO_INCREMENT";
+            $fieldStructure[] = "PRIMARY KEY (`id`)";
+
             $fieldStructure = $this->_makeFieldStructure($fields);
             $indexStructure = $this->_makeIndexStucture($indexes);
 
@@ -38,7 +41,17 @@ class MY_Model extends CI_Model
             $tableFields  = $this->_getTableFields($tableName);
             if (!$tableFields) throw new \Exception("Unexpected Error");
             $changedFields = $this->_getChangedFields($fields, $tableFields);
-            error_log(json_encode($changedFields));
+            $newFields = $changedFields['new'];
+            $modifiedFields = $changedFields['modified'];
+            if (count($newFields)) {
+                $fieldStructure = $this->_makeFieldStructure($newFields);
+                $fieldSQL = implode(", ", $fieldStructure);
+            }
+
+            if (count($modifiedFields)) {
+                $fieldStructure = $this->_makeFieldStructure($modifiedFields);
+                $fieldSQL = implode(", ", $fieldStructure);
+            }
         }
 
         if ($sql) {
@@ -55,9 +68,6 @@ class MY_Model extends CI_Model
             if (!$fieldInfo) continue;
             $fieldStructure[] = $this->_getFieldStruct($name, $fieldInfo);
         }
-
-        $fieldStructure[] = "`id` bigint(20) NOT NULL AUTO_INCREMENT";
-        $fieldStructure[] = "PRIMARY KEY (`id`)";
 
         return $fieldStructure;
     }
@@ -90,12 +100,89 @@ class MY_Model extends CI_Model
 
     private function _getChangedFields($fields, $tableFields)
     {
-        error_log(json_encode($tableFields, JSON_UNESCAPED_UNICODE));
+        $newFields = [];
+        $modifiedFields = [];
         foreach ($fields as $name => $fieldInfo) {
             if (!$fieldInfo) continue;
-            $analyzeArr = $this->_analyzeField($fieldInfo);
-            error_log(json_encode($analyzeArr, JSON_UNESCAPED_UNICODE));
+            $fieldAnalyzes = $this->_analyzeField($fieldInfo);
+            if (!isset($tableFields[$name])) {
+                $newFields[$name] = $fieldInfo;
+                continue;
+            }
+
+            if ($this->_hasChanged($fieldAnalyzes, $tableFields[$name])) {
+                $modifiedFields[$name] = $fieldInfo;
+                continue;
+            }
         }
+
+        return [
+            'new'      => $newFields,
+            'modified' => $modifiedFields
+        ];
+    }
+
+    private function _hasChanged($fieldInfo, $tableFieldInfo)
+    {
+        if ($fieldInfo['type'] != $tableFieldInfo['type']) {
+            return true;
+        }
+
+        if ($fieldInfo['length'] != $tableFieldInfo['length']) {
+            return true;
+        }
+
+        if ($fieldInfo['default'] != $tableFieldInfo['default']) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private function _typeFormate($type)
+    {
+        $enableTypes = [
+            'int'     => 'int',
+            'bigint'  => 'bigint',
+            'varchar' => 'string',
+            'double'  => 'double',
+            'text'    => 'array',
+            'mediumtext' => 'array',
+            'longtext'   => 'array'
+        ];
+
+        return isset($enableTypes[$type]) ? $enableTypes[$type] : false;
+    }
+
+    private function _lengthFormate($type, $length = '')
+    {
+        $length = rtrim($length, ')');
+
+        if ($type == 'text') {
+            $length = '*';
+        }
+
+        if ($type == 'mediumtext') {
+            $length = '**';
+        }
+
+        if ($type == 'longtext') {
+            $length = '***';
+        }
+
+        switch ($type) {
+            case 'text':
+                $length = '*';
+                break;
+            case 'mediumtext':
+                $length = '**';
+                break;
+            case 'longtext':
+                $length = '***';
+                break;
+        }
+
+        return $length;
     }
 
     private function _getTableFields($tableName)
@@ -110,11 +197,14 @@ class MY_Model extends CI_Model
         $results = [];
         foreach ($fields as $field) {
             $name = $field->Field;
-            list($type, $length) = explode('(', $field->Type);
+            $typeAndLength = explode('(', $field->Type);
+            $type    = $this->_typeFormate($typeAndLength[0]) ?: $typeAndLength[0];
+            $length  = $this->_lengthFormate($typeAndLength[0], isset($typeAndLength[1]) ? $typeAndLength[1] : '');
+            $default = $field->Default;
             $results[$name] = [
                 'type'    => $type,
-                'length'  => rtrim($length, ')'),
-                'default' => $field->Default
+                'length'  => $length,
+                'default' => $default
             ];
         }
 
@@ -139,23 +229,22 @@ class MY_Model extends CI_Model
         $type    = $analyzeArr['type'];
         $length  = $analyzeArr['length'];
         $default = $analyzeArr['default'];
-        $comment = $analyzeArr['comment'];
 
         $sqlArr[] = "`{$fieldName}`";
         switch ($type) {
             case 'int':
                 $length = (int)$length ? (int)$length : 11;
-                $sqlArr[] = "int({$length}) NOT NULL DEFAULT '0'";
+                $sqlArr[] = "int({$length}) NOT NULL DEFAULT '{$default}'";
                 break;
             case 'bigint':
                 $length = (int)$length ? (int)$length : 11;
-                $sqlArr[] = "int({$length}) NOT NULL DEFAULT '0'";
+                $sqlArr[] = "int({$length}) NOT NULL DEFAULT '{$default}'";
                 break;
             case 'double':
-                $sqlArr[] = "double NOT NULL DEFAULT '0'";
+                $sqlArr[] = "double NOT NULL DEFAULT '{$default}'";
             case 'string':
                 $length = (int)$length ? (int)$length : 50;
-                $sqlArr[] = "varchar({$length}) NOT NULL DEFAULT ''";
+                $sqlArr[] = "varchar({$length}) NOT NULL DEFAULT '{$default}'";
                 break;
             case 'bool':
                 $sqlArr[] = "int(1) NOT NULL DEFAULT '{$default}'";
@@ -170,6 +259,7 @@ class MY_Model extends CI_Model
         return $sql;
     }
 
+    // TODO default comment 需要调整
     private function _analyzeField($fieldInfo)
     {
         $fieldArrs = explode(',', $fieldInfo);
@@ -177,6 +267,24 @@ class MY_Model extends CI_Model
         $typeInfo = array_shift($fieldArrs);
         $typeArr = explode(':', $typeInfo);
         @list($type, $length) = $typeArr;
+
+        switch ($type) {
+            case 'int':
+                $length = 11;
+                $default = 0;
+            case 'bigint':
+                $length = $length ?: 20;
+                $default = 0;
+            case 'double':
+                $default = 0;
+                break;
+            case 'string':
+                $length = $length ?: 20;
+                $default = '';
+            default:
+                $default = '';
+                break;
+        }
 
         foreach ($fieldArrs as $fieldArr) {
             @list($name, $value) = explode(':', $fieldArr);
@@ -192,7 +300,6 @@ class MY_Model extends CI_Model
         $data['type'] = $type;
         $data['length'] = $length;
         $data['default'] = $default;
-        $data['comment'] = $comment;
 
         return $data;
     }
@@ -201,13 +308,13 @@ class MY_Model extends CI_Model
     {
         switch ($length) {
             case '*':
-                $type = 'mediumtext';
+                $type = 'text';
                 break;
             case '**':
-                $type = 'longtext';
+                $type = 'mediumtext';
                 break;
-            default:
-                $type = 'text';
+            case '***':
+                $type = 'longtext';
                 break;
         }
 
