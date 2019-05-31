@@ -43,15 +43,29 @@ class MY_Model extends CI_Model
             $changedFields = $this->_getChangedFields($fields, $tableFields);
             $newFields = $changedFields['new'];
             $modifiedFields = $changedFields['modified'];
+
+            $sql = '';
             if (count($newFields)) {
-                $fieldStructure = $this->_makeFieldStructure($newFields);
-                $fieldSQL = implode(", ", $fieldStructure);
+                $newFieldStructure = $this->_makeFieldStructure($newFields);
+                foreach ($newFieldStructure as &$structure) {
+                    $structure = 'ADD '. $structure;
+                }
+
+                $sql = implode(", ", $newFieldStructure);
             }
 
             if (count($modifiedFields)) {
-                $fieldStructure = $this->_makeFieldStructure($modifiedFields);
-                $fieldSQL = implode(", ", $fieldStructure);
+                $modifiedFieldStructure = $this->_makeFieldStructure($modifiedFields);
+                foreach ($modifiedFieldStructure as &$structure) {
+                    $structure = 'MODIFY '. $structure;
+                }
+
+                $modifiedFieldSQL = implode(", ", $modifiedFieldStructure);
+
+                $sql = $sql ? $sql . ' ' . $modifiedFieldSQL : $modifiedFieldSQL;
             }
+
+            $sql = $sql ? "ALTER TABLE `{$tableName}` {$sql}" : '';
         }
 
         if ($sql) {
